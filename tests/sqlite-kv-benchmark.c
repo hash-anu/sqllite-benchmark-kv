@@ -24,13 +24,11 @@ double get_time_us() {
     return ts.tv_sec * 1000000.0 + ts.tv_nsec / 1000.0;
 }
 
-// Generate random string
-void generate_random_string(char *str, size_t length) {
-    const char charset[] = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
-    for (size_t i = 0; i < length - 1; i++) {
-        str[i] = charset[rand() % (sizeof(charset) - 1)];
+// Generate random binary data
+void generate_random_blob(unsigned char *blob, size_t length) {
+    for (size_t i = 0; i < length; i++) {
+        blob[i] = rand() % 256;
     }
-    str[length - 1] = '\0';
 }
 
 // Print statistics
@@ -45,7 +43,7 @@ void print_stats(const char *operation, BenchmarkStats *stats) {
     printf("----------------------------------------\n");
 }
 
-// Initialize database
+// Initialize database with BLOB columns
 int init_database(sqlite3 **db, const char *db_path) {
     int rc = sqlite3_open(db_path, db);
     if (rc != SQLITE_OK) {
@@ -55,10 +53,11 @@ int init_database(sqlite3 **db, const char *db_path) {
     
     printf("SQLite version: %s\n", sqlite3_libversion());
     
+    // Create table with BLOB key and BLOB value
     const char *create_table = 
         "CREATE TABLE IF NOT EXISTS kv_store ("
-        "key TEXT PRIMARY KEY, "
-        "value TEXT NOT NULL)";
+        "key BLOB PRIMARY KEY, "
+        "value BLOB NOT NULL)";
     
     char *err_msg = NULL;
     rc = sqlite3_exec(*db, create_table, NULL, NULL, &err_msg);
@@ -68,13 +67,8 @@ int init_database(sqlite3 **db, const char *db_path) {
         return rc;
     }
     
-    // Create index
-    rc = sqlite3_exec(*db, "CREATE INDEX IF NOT EXISTS idx_key ON kv_store(key)", 
-                      NULL, NULL, &err_msg);
-    if (rc != SQLITE_OK) {
-        fprintf(stderr, "SQL error: %s\n", err_msg);
-        sqlite3_free(err_msg);
-    }
+    // Note: Index on BLOB is automatically created for PRIMARY KEY
+    printf("Table created with BLOB key and BLOB value\n");
     
     return rc;
 }
@@ -89,17 +83,17 @@ void benchmark_single_insert(sqlite3 *db, int count) {
     const char *sql = "INSERT INTO kv_store (key, value) VALUES (?, ?)";
     sqlite3_prepare_v2(db, sql, -1, &stmt, NULL);
     
-    char key[KEY_SIZE];
-    char value[VALUE_SIZE];
+    unsigned char *key = malloc(KEY_SIZE);
+    unsigned char *value = malloc(VALUE_SIZE);
     
     for (int i = 0; i < count; i++) {
-        snprintf(key, KEY_SIZE, "single_key_%08d", i);
-        generate_random_string(value, VALUE_SIZE);
+        generate_random_blob(key, KEY_SIZE);
+        generate_random_blob(value, VALUE_SIZE);
         
         double start = get_time_us();
         
-        sqlite3_bind_text(stmt, 1, key, -1, SQLITE_TRANSIENT);
-        sqlite3_bind_text(stmt, 2, value, -1, SQLITE_TRANSIENT);
+        sqlite3_bind_blob(stmt, 1, key, KEY_SIZE, SQLITE_TRANSIENT);
+        sqlite3_bind_blob(stmt, 2, value, VALUE_SIZE, SQLITE_TRANSIENT);
         sqlite3_step(stmt);
         sqlite3_reset(stmt);
         
@@ -109,9 +103,11 @@ void benchmark_single_insert(sqlite3 *db, int count) {
         if (elapsed > stats.max_time) stats.max_time = elapsed;
     }
     
+    free(key);
+    free(value);
     sqlite3_finalize(stmt);
     stats.avg_time = stats.total_time / count;
-    print_stats("Single INSERT", &stats);
+    print_stats("Single INSERT (BLOB)", &stats);
 }
 
 // Benchmark: Batch INSERT with transaction
@@ -125,18 +121,18 @@ void benchmark_batch_insert(sqlite3 *db, int count, int batch_size) {
     const char *sql = "INSERT INTO kv_store (key, value) VALUES (?, ?)";
     sqlite3_prepare_v2(db, sql, -1, &stmt, NULL);
     
-    char key[KEY_SIZE];
-    char value[VALUE_SIZE];
+    unsigned char *key = malloc(KEY_SIZE);
+    unsigned char *value = malloc(VALUE_SIZE);
     
     double start = get_time_us();
     sqlite3_exec(db, "BEGIN TRANSACTION", NULL, NULL, NULL);
     
     for (int i = 0; i < count; i++) {
-        snprintf(key, KEY_SIZE, "batch_key_%08d", i);
-        generate_random_string(value, VALUE_SIZE);
+        generate_random_blob(key, KEY_SIZE);
+        generate_random_blob(value, VALUE_SIZE);
         
-        sqlite3_bind_text(stmt, 1, key, -1, SQLITE_TRANSIENT);
-        sqlite3_bind_text(stmt, 2, value, -1, SQLITE_TRANSIENT);
+        sqlite3_bind_blob(stmt, 1, key, KEY_SIZE, SQLITE_TRANSIENT);
+        sqlite3_bind_blob(stmt, 2, value, VALUE_SIZE, SQLITE_TRANSIENT);
         sqlite3_step(stmt);
         sqlite3_reset(stmt);
         
@@ -149,6 +145,8 @@ void benchmark_batch_insert(sqlite3 *db, int count, int batch_size) {
     sqlite3_exec(db, "COMMIT", NULL, NULL, NULL);
     double elapsed = get_time_us() - start;
     
+    free(key);
+    free(value);
     sqlite3_finalize(stmt);
     
     stats.total_time = elapsed;
@@ -157,12 +155,71 @@ void benchmark_batch_insert(sqlite3 *db, int count, int batch_size) {
     stats.max_time = stats.avg_time;
     stats.count = count;
     
-    print_stats("Batch INSERT", &stats);
+    print_stats("Batch INSERT (BLOB)", &stats);
 }
 
-// Benchmark: GET operations
+// Store keys for later retrieval
+unsigned char **stored_keys = NULL;
+int stored_keys_count = 0;
+
+// Modified batch insert that stores keys for later use
+void benchmark_batch_insert_with_keys(sqlite3 *db, int count, int batch_size) {
+    printf("\n=== Benchmarking Batch INSERT with Key Storage (%d records) ===\n", count);
+    
+    BenchmarkStats stats = {0, 0, 0, 0, 1};
+    sqlite3_stmt *stmt;
+    
+    const char *sql = "INSERT INTO kv_store (key, value) VALUES (?, ?)";
+    sqlite3_prepare_v2(db, sql, -1, &stmt, NULL);
+    
+    // Allocate memory to store keys for later retrieval
+    stored_keys = malloc(count * sizeof(unsigned char*));
+    stored_keys_count = count;
+    
+    unsigned char *value = malloc(VALUE_SIZE);
+    
+    double start = get_time_us();
+    sqlite3_exec(db, "BEGIN TRANSACTION", NULL, NULL, NULL);
+    
+    for (int i = 0; i < count; i++) {
+        stored_keys[i] = malloc(KEY_SIZE);
+        generate_random_blob(stored_keys[i], KEY_SIZE);
+        generate_random_blob(value, VALUE_SIZE);
+        
+        sqlite3_bind_blob(stmt, 1, stored_keys[i], KEY_SIZE, SQLITE_TRANSIENT);
+        sqlite3_bind_blob(stmt, 2, value, VALUE_SIZE, SQLITE_TRANSIENT);
+        sqlite3_step(stmt);
+        sqlite3_reset(stmt);
+        
+        if ((i + 1) % batch_size == 0) {
+            sqlite3_exec(db, "COMMIT", NULL, NULL, NULL);
+            sqlite3_exec(db, "BEGIN TRANSACTION", NULL, NULL, NULL);
+        }
+    }
+    
+    sqlite3_exec(db, "COMMIT", NULL, NULL, NULL);
+    double elapsed = get_time_us() - start;
+    
+    free(value);
+    sqlite3_finalize(stmt);
+    
+    stats.total_time = elapsed;
+    stats.avg_time = elapsed / count;
+    stats.min_time = stats.avg_time;
+    stats.max_time = stats.avg_time;
+    stats.count = count;
+    
+    print_stats("Batch INSERT with Keys (BLOB)", &stats);
+}
+
+// Benchmark: GET operations using BLOB keys
 void benchmark_get(sqlite3 *db, int count) {
-    printf("\n=== Benchmarking %d GET Operations ===\n", count);
+    printf("\n=== Benchmarking %d GET Operations (BLOB keys) ===\n", count);
+    
+    if (stored_keys == NULL || stored_keys_count == 0) {
+        printf("No keys available for GET benchmark. Run batch insert first.\n");
+        return;
+    }
     
     BenchmarkStats stats = {0, 1e9, 0, 0, count};
     sqlite3_stmt *stmt;
@@ -170,19 +227,18 @@ void benchmark_get(sqlite3 *db, int count) {
     const char *sql = "SELECT value FROM kv_store WHERE key = ?";
     sqlite3_prepare_v2(db, sql, -1, &stmt, NULL);
     
-    char key[KEY_SIZE];
-    
     for (int i = 0; i < count; i++) {
-        snprintf(key, KEY_SIZE, "batch_key_%08d", rand() % count);
+        int key_idx = rand() % stored_keys_count;
         
         double start = get_time_us();
         
-        sqlite3_bind_text(stmt, 1, key, -1, SQLITE_TRANSIENT);
+        sqlite3_bind_blob(stmt, 1, stored_keys[key_idx], KEY_SIZE, SQLITE_TRANSIENT);
         int rc = sqlite3_step(stmt);
         if (rc == SQLITE_ROW) {
-            // Read the value
-            const unsigned char *value = sqlite3_column_text(stmt, 0);
-            (void)value; // Suppress unused warning
+            // Read the BLOB value
+            const void *blob = sqlite3_column_blob(stmt, 0);
+            int blob_size = sqlite3_column_bytes(stmt, 0);
+            (void)blob; (void)blob_size; // Suppress unused warning
         }
         sqlite3_reset(stmt);
         
@@ -194,12 +250,17 @@ void benchmark_get(sqlite3 *db, int count) {
     
     sqlite3_finalize(stmt);
     stats.avg_time = stats.total_time / count;
-    print_stats("GET", &stats);
+    print_stats("GET (BLOB)", &stats);
 }
 
-// Benchmark: UPDATE operations
+// Benchmark: UPDATE operations with BLOB
 void benchmark_update(sqlite3 *db, int count) {
-    printf("\n=== Benchmarking %d UPDATE Operations ===\n", count);
+    printf("\n=== Benchmarking %d UPDATE Operations (BLOB) ===\n", count);
+    
+    if (stored_keys == NULL || stored_keys_count == 0) {
+        printf("No keys available for UPDATE benchmark.\n");
+        return;
+    }
     
     BenchmarkStats stats = {0, 1e9, 0, 0, count};
     sqlite3_stmt *stmt;
@@ -207,17 +268,16 @@ void benchmark_update(sqlite3 *db, int count) {
     const char *sql = "UPDATE kv_store SET value = ? WHERE key = ?";
     sqlite3_prepare_v2(db, sql, -1, &stmt, NULL);
     
-    char key[KEY_SIZE];
-    char value[VALUE_SIZE];
+    unsigned char *value = malloc(VALUE_SIZE);
     
     for (int i = 0; i < count; i++) {
-        snprintf(key, KEY_SIZE, "batch_key_%08d", rand() % count);
-        generate_random_string(value, VALUE_SIZE);
+        int key_idx = rand() % stored_keys_count;
+        generate_random_blob(value, VALUE_SIZE);
         
         double start = get_time_us();
         
-        sqlite3_bind_text(stmt, 1, value, -1, SQLITE_TRANSIENT);
-        sqlite3_bind_text(stmt, 2, key, -1, SQLITE_TRANSIENT);
+        sqlite3_bind_blob(stmt, 1, value, VALUE_SIZE, SQLITE_TRANSIENT);
+        sqlite3_bind_blob(stmt, 2, stored_keys[key_idx], KEY_SIZE, SQLITE_TRANSIENT);
         sqlite3_step(stmt);
         sqlite3_reset(stmt);
         
@@ -227,14 +287,20 @@ void benchmark_update(sqlite3 *db, int count) {
         if (elapsed > stats.max_time) stats.max_time = elapsed;
     }
     
+    free(value);
     sqlite3_finalize(stmt);
     stats.avg_time = stats.total_time / count;
-    print_stats("UPDATE", &stats);
+    print_stats("UPDATE (BLOB)", &stats);
 }
 
-// Benchmark: DELETE operations
+// Benchmark: DELETE operations with BLOB keys
 void benchmark_delete(sqlite3 *db, int count) {
-    printf("\n=== Benchmarking %d DELETE Operations ===\n", count);
+    printf("\n=== Benchmarking %d DELETE Operations (BLOB keys) ===\n", count);
+    
+    if (stored_keys == NULL || stored_keys_count == 0) {
+        printf("No keys available for DELETE benchmark.\n");
+        return;
+    }
     
     BenchmarkStats stats = {0, 1e9, 0, 0, count};
     sqlite3_stmt *stmt;
@@ -242,14 +308,12 @@ void benchmark_delete(sqlite3 *db, int count) {
     const char *sql = "DELETE FROM kv_store WHERE key = ?";
     sqlite3_prepare_v2(db, sql, -1, &stmt, NULL);
     
-    char key[KEY_SIZE];
+    int delete_count = (count > stored_keys_count) ? stored_keys_count : count;
     
-    for (int i = 0; i < count; i++) {
-        snprintf(key, KEY_SIZE, "batch_key_%08d", i);
-        
+    for (int i = 0; i < delete_count; i++) {
         double start = get_time_us();
         
-        sqlite3_bind_text(stmt, 1, key, -1, SQLITE_TRANSIENT);
+        sqlite3_bind_blob(stmt, 1, stored_keys[i], KEY_SIZE, SQLITE_TRANSIENT);
         sqlite3_step(stmt);
         sqlite3_reset(stmt);
         
@@ -260,16 +324,66 @@ void benchmark_delete(sqlite3 *db, int count) {
     }
     
     sqlite3_finalize(stmt);
-    stats.avg_time = stats.total_time / count;
-    print_stats("DELETE", &stats);
+    stats.count = delete_count;
+    stats.avg_time = stats.total_time / delete_count;
+    print_stats("DELETE (BLOB)", &stats);
 }
 
-// Benchmark: Transaction with mixed operations
-void benchmark_mixed_transaction(sqlite3 *db, int count) {
-    printf("\n=== Benchmarking Mixed Transaction (%d ops: INSERT/UPDATE/SELECT) ===\n", count);
+// Benchmark: UPSERT operations (INSERT OR REPLACE) with BLOB
+void benchmark_upsert(sqlite3 *db, int count) {
+    printf("\n=== Benchmarking %d UPSERT Operations (BLOB) ===\n", count);
     
-    char key[KEY_SIZE];
-    char value[VALUE_SIZE];
+    if (stored_keys == NULL || stored_keys_count == 0) {
+        printf("No keys available for UPSERT benchmark.\n");
+        return;
+    }
+    
+    BenchmarkStats stats = {0, 1e9, 0, 0, count};
+    sqlite3_stmt *stmt;
+    
+    const char *sql = "INSERT OR REPLACE INTO kv_store (key, value) VALUES (?, ?)";
+    sqlite3_prepare_v2(db, sql, -1, &stmt, NULL);
+    
+    unsigned char *value = malloc(VALUE_SIZE);
+    
+    sqlite3_exec(db, "BEGIN TRANSACTION", NULL, NULL, NULL);
+    
+    for (int i = 0; i < count; i++) {
+        int key_idx = rand() % stored_keys_count;
+        generate_random_blob(value, VALUE_SIZE);
+        
+        double start = get_time_us();
+        
+        sqlite3_bind_blob(stmt, 1, stored_keys[key_idx], KEY_SIZE, SQLITE_TRANSIENT);
+        sqlite3_bind_blob(stmt, 2, value, VALUE_SIZE, SQLITE_TRANSIENT);
+        sqlite3_step(stmt);
+        sqlite3_reset(stmt);
+        
+        double elapsed = get_time_us() - start;
+        stats.total_time += elapsed;
+        if (elapsed < stats.min_time) stats.min_time = elapsed;
+        if (elapsed > stats.max_time) stats.max_time = elapsed;
+    }
+    
+    sqlite3_exec(db, "COMMIT", NULL, NULL, NULL);
+    
+    free(value);
+    sqlite3_finalize(stmt);
+    stats.avg_time = stats.total_time / count;
+    print_stats("UPSERT (BLOB)", &stats);
+}
+
+// Benchmark: Mixed transaction with BLOB
+void benchmark_mixed_transaction(sqlite3 *db, int count) {
+    printf("\n=== Benchmarking Mixed Transaction (BLOB, %d ops) ===\n", count);
+    
+    if (stored_keys == NULL || stored_keys_count == 0) {
+        printf("No keys available for mixed transaction benchmark.\n");
+        return;
+    }
+    
+    unsigned char *key = malloc(KEY_SIZE);
+    unsigned char *value = malloc(VALUE_SIZE);
     
     double start = get_time_us();
     sqlite3_exec(db, "BEGIN TRANSACTION", NULL, NULL, NULL);
@@ -284,24 +398,25 @@ void benchmark_mixed_transaction(sqlite3 *db, int count) {
     
     for (int i = 0; i < count; i++) {
         int op = rand() % 3;
-        snprintf(key, KEY_SIZE, "mixed_key_%08d", rand() % count);
-        generate_random_string(value, VALUE_SIZE);
+        int key_idx = rand() % stored_keys_count;
+        generate_random_blob(value, VALUE_SIZE);
         
         switch(op) {
-            case 0: // INSERT
-                sqlite3_bind_text(insert_stmt, 1, key, -1, SQLITE_TRANSIENT);
-                sqlite3_bind_text(insert_stmt, 2, value, -1, SQLITE_TRANSIENT);
+            case 0: // INSERT with new random key
+                generate_random_blob(key, KEY_SIZE);
+                sqlite3_bind_blob(insert_stmt, 1, key, KEY_SIZE, SQLITE_TRANSIENT);
+                sqlite3_bind_blob(insert_stmt, 2, value, VALUE_SIZE, SQLITE_TRANSIENT);
                 sqlite3_step(insert_stmt);
                 sqlite3_reset(insert_stmt);
                 break;
-            case 1: // UPDATE
-                sqlite3_bind_text(update_stmt, 1, value, -1, SQLITE_TRANSIENT);
-                sqlite3_bind_text(update_stmt, 2, key, -1, SQLITE_TRANSIENT);
+            case 1: // UPDATE existing key
+                sqlite3_bind_blob(update_stmt, 1, value, VALUE_SIZE, SQLITE_TRANSIENT);
+                sqlite3_bind_blob(update_stmt, 2, stored_keys[key_idx], KEY_SIZE, SQLITE_TRANSIENT);
                 sqlite3_step(update_stmt);
                 sqlite3_reset(update_stmt);
                 break;
             case 2: // SELECT
-                sqlite3_bind_text(select_stmt, 1, key, -1, SQLITE_TRANSIENT);
+                sqlite3_bind_blob(select_stmt, 1, stored_keys[key_idx], KEY_SIZE, SQLITE_TRANSIENT);
                 sqlite3_step(select_stmt);
                 sqlite3_reset(select_stmt);
                 break;
@@ -311,19 +426,24 @@ void benchmark_mixed_transaction(sqlite3 *db, int count) {
     sqlite3_exec(db, "COMMIT", NULL, NULL, NULL);
     double elapsed = get_time_us() - start;
     
+    free(key);
+    free(value);
     sqlite3_finalize(insert_stmt);
     sqlite3_finalize(update_stmt);
     sqlite3_finalize(select_stmt);
     
     BenchmarkStats stats = {elapsed, elapsed/count, elapsed/count, elapsed/count, count};
-    print_stats("Mixed Transaction", &stats);
+    print_stats("Mixed Transaction (BLOB)", &stats);
 }
 
-// Benchmark: Concurrent read transactions (simulated)
+// Benchmark: Read transaction with BLOB
 void benchmark_read_transaction(sqlite3 *db, int count) {
-    printf("\n=== Benchmarking Read Transaction (%d SELECTs) ===\n", count);
+    printf("\n=== Benchmarking Read Transaction (BLOB, %d SELECTs) ===\n", count);
     
-    char key[KEY_SIZE];
+    if (stored_keys == NULL || stored_keys_count == 0) {
+        printf("No keys available for read transaction benchmark.\n");
+        return;
+    }
     
     double start = get_time_us();
     sqlite3_exec(db, "BEGIN TRANSACTION", NULL, NULL, NULL);
@@ -332,8 +452,8 @@ void benchmark_read_transaction(sqlite3 *db, int count) {
     sqlite3_prepare_v2(db, "SELECT value FROM kv_store WHERE key = ?", -1, &stmt, NULL);
     
     for (int i = 0; i < count; i++) {
-        snprintf(key, KEY_SIZE, "batch_key_%08d", rand() % NUM_OPERATIONS);
-        sqlite3_bind_text(stmt, 1, key, -1, SQLITE_TRANSIENT);
+        int key_idx = rand() % stored_keys_count;
+        sqlite3_bind_blob(stmt, 1, stored_keys[key_idx], KEY_SIZE, SQLITE_TRANSIENT);
         sqlite3_step(stmt);
         sqlite3_reset(stmt);
     }
@@ -344,51 +464,12 @@ void benchmark_read_transaction(sqlite3 *db, int count) {
     sqlite3_finalize(stmt);
     
     BenchmarkStats stats = {elapsed, elapsed/count, elapsed/count, elapsed/count, count};
-    print_stats("Read Transaction", &stats);
+    print_stats("Read Transaction (BLOB)", &stats);
 }
 
-// Benchmark: UPSERT operations (INSERT OR REPLACE)
-void benchmark_upsert(sqlite3 *db, int count) {
-    printf("\n=== Benchmarking %d UPSERT Operations (INSERT OR REPLACE) ===\n", count);
-    
-    BenchmarkStats stats = {0, 1e9, 0, 0, count};
-    sqlite3_stmt *stmt;
-    
-    const char *sql = "INSERT OR REPLACE INTO kv_store (key, value) VALUES (?, ?)";
-    sqlite3_prepare_v2(db, sql, -1, &stmt, NULL);
-    
-    char key[KEY_SIZE];
-    char value[VALUE_SIZE];
-    
-    sqlite3_exec(db, "BEGIN TRANSACTION", NULL, NULL, NULL);
-    
-    for (int i = 0; i < count; i++) {
-        snprintf(key, KEY_SIZE, "batch_key_%08d", rand() % NUM_OPERATIONS);
-        generate_random_string(value, VALUE_SIZE);
-        
-        double start = get_time_us();
-        
-        sqlite3_bind_text(stmt, 1, key, -1, SQLITE_TRANSIENT);
-        sqlite3_bind_text(stmt, 2, value, -1, SQLITE_TRANSIENT);
-        sqlite3_step(stmt);
-        sqlite3_reset(stmt);
-        
-        double elapsed = get_time_us() - start;
-        stats.total_time += elapsed;
-        if (elapsed < stats.min_time) stats.min_time = elapsed;
-        if (elapsed > stats.max_time) stats.max_time = elapsed;
-    }
-    
-    sqlite3_exec(db, "COMMIT", NULL, NULL, NULL);
-    
-    sqlite3_finalize(stmt);
-    stats.avg_time = stats.total_time / count;
-    print_stats("UPSERT", &stats);
-}
-
-// Benchmark: Bulk scan operations
+// Benchmark: Full table scan with BLOB
 void benchmark_scan(sqlite3 *db) {
-    printf("\n=== Benchmarking Full Table SCAN ===\n");
+    printf("\n=== Benchmarking Full Table SCAN (BLOB) ===\n");
     
     double start = get_time_us();
     
@@ -396,10 +477,18 @@ void benchmark_scan(sqlite3 *db) {
     sqlite3_prepare_v2(db, "SELECT key, value FROM kv_store", -1, &stmt, NULL);
     
     int count = 0;
+    size_t total_key_bytes = 0;
+    size_t total_value_bytes = 0;
+    
     while (sqlite3_step(stmt) == SQLITE_ROW) {
-        const unsigned char *key = sqlite3_column_text(stmt, 0);
-        const unsigned char *value = sqlite3_column_text(stmt, 1);
+        const void *key = sqlite3_column_blob(stmt, 0);
+        int key_size = sqlite3_column_bytes(stmt, 0);
+        const void *value = sqlite3_column_blob(stmt, 1);
+        int value_size = sqlite3_column_bytes(stmt, 1);
+        
         (void)key; (void)value; // Suppress unused warnings
+        total_key_bytes += key_size;
+        total_value_bytes += value_size;
         count++;
     }
     
@@ -407,10 +496,76 @@ void benchmark_scan(sqlite3 *db) {
     sqlite3_finalize(stmt);
     
     printf("  Scanned %d rows\n", count);
+    printf("  Total key bytes: %zu (avg: %.1f bytes)\n", total_key_bytes, (double)total_key_bytes/count);
+    printf("  Total value bytes: %zu (avg: %.1f bytes)\n", total_value_bytes, (double)total_value_bytes/count);
     printf("  Total time: %.2f ms\n", elapsed / 1000.0);
     printf("  Average time per row: %.2f µs\n", elapsed / count);
     printf("  Throughput: %.2f rows/sec\n", count * 1000000.0 / elapsed);
     printf("----------------------------------------\n");
+}
+
+// Benchmark: Variable size BLOBs
+void benchmark_variable_blob_sizes(sqlite3 *db) {
+    printf("\n=== Benchmarking Variable BLOB Sizes ===\n");
+    
+    int sizes[] = {16, 64, 256, 1024, 4096, 16384, 65536};
+    int num_sizes = sizeof(sizes) / sizeof(sizes[0]);
+    int ops_per_size = 1000;
+    
+    sqlite3_stmt *insert_stmt, *select_stmt;
+    sqlite3_prepare_v2(db, "INSERT INTO kv_store (key, value) VALUES (?, ?)", 
+                       -1, &insert_stmt, NULL);
+    sqlite3_prepare_v2(db, "SELECT value FROM kv_store WHERE key = ?", 
+                       -1, &select_stmt, NULL);
+    
+    for (int s = 0; s < num_sizes; s++) {
+        int size = sizes[s];
+        unsigned char *key = malloc(KEY_SIZE);
+        unsigned char *value = malloc(size);
+        
+        // Insert benchmark
+        double insert_start = get_time_us();
+        sqlite3_exec(db, "BEGIN TRANSACTION", NULL, NULL, NULL);
+        
+        for (int i = 0; i < ops_per_size; i++) {
+            generate_random_blob(key, KEY_SIZE);
+            generate_random_blob(value, size);
+            sqlite3_bind_blob(insert_stmt, 1, key, KEY_SIZE, SQLITE_TRANSIENT);
+            sqlite3_bind_blob(insert_stmt, 2, value, size, SQLITE_TRANSIENT);
+            sqlite3_step(insert_stmt);
+            sqlite3_reset(insert_stmt);
+        }
+        
+        sqlite3_exec(db, "COMMIT", NULL, NULL, NULL);
+        double insert_elapsed = get_time_us() - insert_start;
+        
+        printf("  Size %d bytes: INSERT %.2f µs/op (%.2f MB/s)\n", 
+               size, 
+               insert_elapsed / ops_per_size,
+               (size * ops_per_size) / insert_elapsed);
+        
+        free(key);
+        free(value);
+        
+        // Clean up for next iteration
+        sqlite3_exec(db, "DELETE FROM kv_store", NULL, NULL, NULL);
+    }
+    
+    sqlite3_finalize(insert_stmt);
+    sqlite3_finalize(select_stmt);
+    printf("----------------------------------------\n");
+}
+
+// Cleanup stored keys
+void cleanup_stored_keys() {
+    if (stored_keys != NULL) {
+        for (int i = 0; i < stored_keys_count; i++) {
+            free(stored_keys[i]);
+        }
+        free(stored_keys);
+        stored_keys = NULL;
+        stored_keys_count = 0;
+    }
 }
 
 int main() {
@@ -418,11 +573,12 @@ int main() {
     srand(time(NULL));
     
     printf("========================================\n");
-    printf("SQLite Key-Value Store Benchmark\n");
+    printf("SQLite BLOB Key-Value Store Benchmark\n");
+    printf("Key: BLOB (%d bytes), Value: BLOB (%d bytes)\n", KEY_SIZE, VALUE_SIZE);
     printf("========================================\n");
     
     // Initialize database
-    if (init_database(&db, "benchmark.db") != SQLITE_OK) {
+    if (init_database(&db, "benchmark_blob.db") != SQLITE_OK) {
         return 1;
     }
     
@@ -434,7 +590,7 @@ int main() {
     
     // Run benchmarks
     benchmark_single_insert(db, 1000);
-    benchmark_batch_insert(db, NUM_OPERATIONS, BATCH_SIZE);
+    benchmark_batch_insert_with_keys(db, NUM_OPERATIONS, BATCH_SIZE);
     benchmark_get(db, NUM_OPERATIONS);
     benchmark_update(db, 5000);
     benchmark_upsert(db, 5000);
@@ -443,12 +599,24 @@ int main() {
     benchmark_read_transaction(db, 5000);
     benchmark_scan(db);
     
+    // Clean up and test variable sizes
+    sqlite3_exec(db, "DELETE FROM kv_store", NULL, NULL, NULL);
+    benchmark_variable_blob_sizes(db);
+    
     // Cleanup
+    cleanup_stored_keys();
     sqlite3_close(db);
     
     printf("\nBenchmark completed!\n");
-    printf("Database file: benchmark.db\n");
+    printf("Database file: benchmark_blob.db\n");
     
     return 0;
 }
 
+/* 
+ * Compilation instructions:
+ * gcc -o sqlite_blob_benchmark sqlite_blob_benchmark.c -lsqlite3 -O3
+ * 
+ * Run:
+ * ./sqlite_blob_benchmark
+ */

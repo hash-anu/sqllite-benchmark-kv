@@ -19,4 +19,4 @@ sqlite_benchmark: tests/sqlite-kv-benchmark.c src/sqlite3.c
 test: sqlite_benchmark
 
 clean:
-	rm -f $(OBJ) $(TARGET) sqlite_benchmark benchmark.db
+	rm -f $(OBJ) $(TARGET) sqlite_benchmark benchmark*.db
