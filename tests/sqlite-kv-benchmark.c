@@ -78,8 +78,8 @@ static int exec_sql(sqlite3 *db, const char *sql) {
 static int init_database(sqlite3 *db) {
     const char *create_table = 
         "CREATE TABLE IF NOT EXISTS kvpairs ("
-        "  key TEXT PRIMARY KEY,"
-        "  value TEXT NOT NULL"
+        "  key BLOB PRIMARY KEY,"
+        "  value BLOB NOT NULL"
         ")";
     
     const char *create_index = 
@@ -94,7 +94,7 @@ static int init_database(sqlite3 *db) {
   //  exec_sql(db, "PRAGMA cache_size = -64000");
   //  exec_sql(db, "PRAGMA temp_store = MEMORY");
     exec_sql(db, "PRAGMA page_size = 1024");
-exec_sql(db, "PRAGMA max_page_count = 2000");
+    exec_sql(db, "PRAGMA max_page_count = 2000");
 exec_sql(db, "PRAGMA journal_mode = DELETE"); /* match rollback journal */
 exec_sql(db, "PRAGMA synchronous = FULL");    /* fair durability */
 
@@ -130,10 +130,10 @@ static void bench_sequential_writes(sqlite3 *db) {
         }
         
         snprintf(sql, sizeof(sql), "key_%08d", i);
-        sqlite3_bind_text(stmt, 1, sql, -1, SQLITE_TRANSIENT);
+        sqlite3_bind_blob(stmt, 1, sql, strlen(sql), SQLITE_TRANSIENT);
         
         snprintf(sql, sizeof(sql), "value_%08d_with_some_additional_data_to_make_it_realistic", i);
-        sqlite3_bind_text(stmt, 2, sql, -1, SQLITE_TRANSIENT);
+        sqlite3_bind_blob(stmt, 2, sql, strlen(sql), SQLITE_TRANSIENT);
         
         sqlite3_step(stmt);
         sqlite3_reset(stmt);
@@ -171,11 +171,11 @@ static void bench_random_reads(sqlite3 *db) {
         int idx = rand() % NUM_RECORDS;
         snprintf(key, sizeof(key), "key_%08d", idx);
         
-        sqlite3_bind_text(stmt, 1, key, -1, SQLITE_TRANSIENT);
+        sqlite3_bind_blob(stmt, 1, key, strlen(key), SQLITE_TRANSIENT);
         
         if (sqlite3_step(stmt) == SQLITE_ROW) {
             /* Got the value - just consume it */
-            sqlite3_column_text(stmt, 0);
+            sqlite3_column_blob(stmt, 0);
         }
         
         sqlite3_reset(stmt);
@@ -208,8 +208,8 @@ static void bench_sequential_scan(sqlite3 *db) {
     
     while (sqlite3_step(stmt) == SQLITE_ROW) {
         /* Access key and value to simulate real work */
-        sqlite3_column_text(stmt, 0);
-        sqlite3_column_text(stmt, 1);
+        sqlite3_column_blob(stmt, 0);
+        sqlite3_column_blob(stmt, 1);
         count++;
     }
     
@@ -246,8 +246,8 @@ static void bench_random_updates(sqlite3 *db) {
         snprintf(key, sizeof(key), "key_%08d", idx);
         snprintf(value, sizeof(value), "updated_value_%08d", idx);
         
-        sqlite3_bind_text(stmt, 1, value, -1, SQLITE_TRANSIENT);
-        sqlite3_bind_text(stmt, 2, key, -1, SQLITE_TRANSIENT);
+        sqlite3_bind_blob(stmt, 1, value, strlen(value), SQLITE_TRANSIENT);
+        sqlite3_bind_blob(stmt, 2, key, strlen(key), SQLITE_TRANSIENT);
         
         sqlite3_step(stmt);
         sqlite3_reset(stmt);
@@ -287,7 +287,7 @@ static void bench_random_deletes(sqlite3 *db) {
         int idx = rand() % NUM_RECORDS;
         snprintf(key, sizeof(key), "key_%08d", idx);
         
-        sqlite3_bind_text(stmt, 1, key, -1, SQLITE_TRANSIENT);
+        sqlite3_bind_blob(stmt, 1, key, strlen(key), SQLITE_TRANSIENT);
         sqlite3_step(stmt);
         sqlite3_reset(stmt);
     }
@@ -324,7 +324,7 @@ static void bench_exists_checks(sqlite3 *db) {
         int idx = rand() % NUM_RECORDS;
         snprintf(key, sizeof(key), "key_%08d", idx);
         
-        sqlite3_bind_text(stmt, 1, key, -1, SQLITE_TRANSIENT);
+        sqlite3_bind_blob(stmt, 1, key, strlen(key), SQLITE_TRANSIENT);
         sqlite3_step(stmt);
         sqlite3_reset(stmt);
     }
@@ -366,21 +366,21 @@ static void bench_mixed_workload(sqlite3 *db) {
         
         if (op < 70) {
             /* Read */
-            sqlite3_bind_text(select_stmt, 1, key, -1, SQLITE_TRANSIENT);
+            sqlite3_bind_blob(select_stmt, 1, key, strlen(key), SQLITE_TRANSIENT);
             if (sqlite3_step(select_stmt) == SQLITE_ROW) {
-                sqlite3_column_text(select_stmt, 0);
+                sqlite3_column_blob(select_stmt, 0);
             }
             sqlite3_reset(select_stmt);
         } else if (op < 90) {
             /* Write */
             snprintf(value, sizeof(value), "mixed_value_%08d", idx);
-            sqlite3_bind_text(update_stmt, 1, key, -1, SQLITE_TRANSIENT);
-            sqlite3_bind_text(update_stmt, 2, value, -1, SQLITE_TRANSIENT);
+            sqlite3_bind_blob(update_stmt, 1, key, strlen(key), SQLITE_TRANSIENT);
+            sqlite3_bind_blob(update_stmt, 2, value, strlen(value), SQLITE_TRANSIENT);
             sqlite3_step(update_stmt);
             sqlite3_reset(update_stmt);
         } else {
             /* Delete */
-            sqlite3_bind_text(delete_stmt, 1, key, -1, SQLITE_TRANSIENT);
+            sqlite3_bind_blob(delete_stmt, 1, key, strlen(key), SQLITE_TRANSIENT);
             sqlite3_step(delete_stmt);
             sqlite3_reset(delete_stmt);
         }
@@ -429,8 +429,8 @@ static void bench_bulk_insert(void) {
         snprintf(key, sizeof(key), "bulk_key_%08d", i);
         snprintf(value, sizeof(value), "bulk_value_%08d", i);
         
-        sqlite3_bind_text(stmt, 1, key, -1, SQLITE_TRANSIENT);
-        sqlite3_bind_text(stmt, 2, value, -1, SQLITE_TRANSIENT);
+        sqlite3_bind_blob(stmt, 1, key, strlen(key), SQLITE_TRANSIENT);
+        sqlite3_bind_blob(stmt, 2, value, strlen(value), SQLITE_TRANSIENT);
         
         sqlite3_step(stmt);
         sqlite3_reset(stmt);
