@@ -77,16 +77,11 @@ static int exec_sql(sqlite3 *db, const char *sql) {
 /* Initialize database with table */
 static int init_database(sqlite3 *db) {
     const char *create_table = 
-        "CREATE TABLE IF NOT EXISTS kvpairs ("
-        "  key BLOB PRIMARY KEY,"
-        "  value BLOB NOT NULL"
-        ")";
-    
-    const char *create_index = 
-        "CREATE INDEX IF NOT EXISTS idx_key ON kvpairs(key)";
-    
+    "CREATE TABLE IF NOT EXISTS kvpairs ("
+    "  key BLOB PRIMARY KEY,"
+    "  value BLOB NOT NULL"
+    ") WITHOUT ROWID";
     if (exec_sql(db, create_table) != 0) return -1;
-    if (exec_sql(db, create_index) != 0) return -1;
     
     /* Enable optimizations */
   //  exec_sql(db, "PRAGMA synchronous = NORMAL");
@@ -534,7 +529,7 @@ int main(void) {
     printf("\n" COLOR_GREEN "✓ Benchmark complete!" COLOR_RESET "\n\n");
     
     /* Cleanup */
-    remove(DB_FILE);
+    //remove(DB_FILE);
     
     return 0;
 }
