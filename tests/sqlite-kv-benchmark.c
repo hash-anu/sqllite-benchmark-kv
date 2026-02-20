@@ -91,7 +91,7 @@ static int init_database(sqlite3 *db) {
     exec_sql(db, "PRAGMA page_size = 4096");
     exec_sql(db, "PRAGMA cache_size = 2000");
 exec_sql(db, "PRAGMA journal_mode = WAL"); /* match rollback journal */
-exec_sql(db, "PRAGMA synchronous = FULL");    /* fair durability */
+exec_sql(db, "PRAGMA synchronous = NORMAL");    /* fair durability */
 
     return 0;
 }
