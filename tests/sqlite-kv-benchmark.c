@@ -486,17 +486,6 @@ int main(void) {
     bench_exists_checks(db);
     bench_mixed_workload(db);
     
-    total_end = get_time();
-    
-    /* Summary */
-    printf("\n" COLOR_CYAN);
-    printf("════════════════════════════════════════════════════════\n");
-    printf("  SUMMARY\n");
-    printf("════════════════════════════════════════════════════════\n");
-    printf(COLOR_RESET);
-    printf("  Total benchmark time: " COLOR_GREEN "%.2f seconds" COLOR_RESET "\n", 
-           total_end - total_start);
-    
     /* Get database stats */
     sqlite3_stmt *stmt = NULL;
     rc = sqlite3_prepare_v2(db, "SELECT COUNT(*) FROM kvpairs", -1, &stmt, NULL);
@@ -525,11 +514,22 @@ int main(void) {
     
     /* Run bulk insert test */
     bench_bulk_insert();
+    total_end = get_time();
+    
+    /* Summary */
+    printf("\n" COLOR_CYAN);
+    printf("════════════════════════════════════════════════════════\n");
+    printf("  SUMMARY\n");
+    printf("════════════════════════════════════════════════════════\n");
+    printf(COLOR_RESET);
+    printf("  Total benchmark time: " COLOR_GREEN "%.2f seconds" COLOR_RESET "\n", 
+           total_end - total_start);
+    
     
     printf("\n" COLOR_GREEN "✓ Benchmark complete!" COLOR_RESET "\n\n");
     
     /* Cleanup */
-    //remove(DB_FILE);
+    remove(DB_FILE);
     
     return 0;
 }
