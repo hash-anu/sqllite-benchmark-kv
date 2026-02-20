@@ -13,7 +13,7 @@
 #include <sqlite3.h>
 
 #define DB_FILE "benchmark_sql.db"
-#define NUM_RECORDS 50000
+#define NUM_RECORDS 1000000
 #define BATCH_SIZE 1000
 #define NUM_READS 50000
 #define NUM_UPDATES 10000
@@ -93,9 +93,9 @@ static int init_database(sqlite3 *db) {
   //  exec_sql(db, "PRAGMA journal_mode = WAL");
   //  exec_sql(db, "PRAGMA cache_size = -64000");
   //  exec_sql(db, "PRAGMA temp_store = MEMORY");
-    exec_sql(db, "PRAGMA page_size = 1024");
-    exec_sql(db, "PRAGMA max_page_count = 2000");
-exec_sql(db, "PRAGMA journal_mode = DELETE"); /* match rollback journal */
+    exec_sql(db, "PRAGMA page_size = 4096");
+    exec_sql(db, "PRAGMA cache_size = 2000");
+exec_sql(db, "PRAGMA journal_mode = WAL"); /* match rollback journal */
 exec_sql(db, "PRAGMA synchronous = FULL");    /* fair durability */
 
     return 0;
