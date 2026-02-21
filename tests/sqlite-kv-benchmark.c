@@ -9,7 +9,11 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
-#include <sys/time.h>
+#ifdef _WIN32
+#  include <windows.h>
+#else
+#  include <sys/time.h>
+#endif
 #include <sqlite3.h>
 
 #define DB_FILE "benchmark_sql.db"
@@ -27,9 +31,16 @@
 
 /* High-resolution timer */
 static double get_time(void) {
+#ifdef _WIN32
+    LARGE_INTEGER freq, count;
+    QueryPerformanceFrequency(&freq);
+    QueryPerformanceCounter(&count);
+    return (double)count.QuadPart / (double)freq.QuadPart;
+#else
     struct timeval tv;
     gettimeofday(&tv, NULL);
     return tv.tv_sec + tv.tv_usec / 1000000.0;
+#endif
 }
 
 /* Format numbers with commas */
@@ -447,7 +458,17 @@ int main(void) {
     sqlite3 *db = NULL;
     double total_start, total_end;
     int rc;
-    
+
+#ifdef _WIN32
+    /* Set UTF-8 output so Unicode box-drawing chars render correctly */
+    SetConsoleOutputCP(CP_UTF8);
+    /* Enable ANSI escape sequence processing for colors */
+    HANDLE hOut = GetStdHandle(STD_OUTPUT_HANDLE);
+    DWORD dwMode = 0;
+    GetConsoleMode(hOut, &dwMode);
+    SetConsoleMode(hOut, dwMode | ENABLE_VIRTUAL_TERMINAL_PROCESSING);
+#endif
+
     printf("\n");
     printf(COLOR_BLUE "╔══════════════════════════════════════════════════════════════╗\n");
     printf("║          SQLite Performance Benchmark                        ║\n");
