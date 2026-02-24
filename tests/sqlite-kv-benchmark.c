@@ -73,7 +73,7 @@ static void print_header(const char *title) {
     printf(COLOR_RESET);
 }
 
-/* Execute SQL without result */
+/* Execute SQL without result — only used for DDL/PRAGMA at init time */
 static int exec_sql(sqlite3 *db, const char *sql) {
     char *err_msg = NULL;
     int rc = sqlite3_exec(db, sql, NULL, NULL, &err_msg);
@@ -83,6 +83,22 @@ static int exec_sql(sqlite3 *db, const char *sql) {
         return -1;
     }
     return 0;
+}
+
+/* Begin/commit via prepared statements (no SQL parsing overhead) */
+static sqlite3_stmt *prepare_begin(sqlite3 *db) {
+    sqlite3_stmt *s = NULL;
+    sqlite3_prepare_v2(db, "BEGIN TRANSACTION", -1, &s, NULL);
+    return s;
+}
+static sqlite3_stmt *prepare_commit(sqlite3 *db) {
+    sqlite3_stmt *s = NULL;
+    sqlite3_prepare_v2(db, "COMMIT", -1, &s, NULL);
+    return s;
+}
+static void run_stmt(sqlite3_stmt *s) {
+    sqlite3_step(s);
+    sqlite3_reset(s);
 }
 
 /* Initialize database with table */
@@ -116,7 +132,9 @@ static void bench_sequential_writes(sqlite3 *db) {
     int i, rc;
     double start, end;
     sqlite3_stmt *stmt = NULL;
-    
+    sqlite3_stmt *begin_stmt = prepare_begin(db);
+    sqlite3_stmt *commit_stmt = prepare_commit(db);
+
     /* Prepare statement */
     const char *insert_sql = "INSERT OR REPLACE INTO kvpairs (key, value) VALUES (?, ?)";
     rc = sqlite3_prepare_v2(db, insert_sql, -1, &stmt, NULL);
@@ -124,32 +142,34 @@ static void bench_sequential_writes(sqlite3 *db) {
         fprintf(stderr, "Failed to prepare statement: %s\n", sqlite3_errmsg(db));
         return;
     }
-    
+
     start = get_time();
-    
+
     for (i = 0; i < NUM_RECORDS; i++) {
         if (i % BATCH_SIZE == 0) {
             if (i > 0) {
-                exec_sql(db, "COMMIT");
+                run_stmt(commit_stmt);
             }
-            exec_sql(db, "BEGIN TRANSACTION");
+            run_stmt(begin_stmt);
         }
-        
+
         snprintf(sql, sizeof(sql), "key_%08d", i);
         sqlite3_bind_blob(stmt, 1, sql, strlen(sql), SQLITE_TRANSIENT);
-        
+
         snprintf(sql, sizeof(sql), "value_%08d_with_some_additional_data_to_make_it_realistic", i);
         sqlite3_bind_blob(stmt, 2, sql, strlen(sql), SQLITE_TRANSIENT);
-        
+
         sqlite3_step(stmt);
         sqlite3_reset(stmt);
     }
-    
-    exec_sql(db, "COMMIT");
-    
+
+    run_stmt(commit_stmt);
+
     end = get_time();
-    
+
     sqlite3_finalize(stmt);
+    sqlite3_finalize(begin_stmt);
+    sqlite3_finalize(commit_stmt);
     
     print_result("Sequential writes", end - start, NUM_RECORDS);
 }
@@ -236,34 +256,38 @@ static void bench_random_updates(sqlite3 *db) {
     double start, end;
     sqlite3_stmt *stmt = NULL;
     
+    sqlite3_stmt *begin_stmt = prepare_begin(db);
+    sqlite3_stmt *commit_stmt = prepare_commit(db);
     const char *update_sql = "UPDATE kvpairs SET value = ? WHERE key = ?";
     rc = sqlite3_prepare_v2(db, update_sql, -1, &stmt, NULL);
     if (rc != SQLITE_OK) {
         fprintf(stderr, "Failed to prepare statement: %s\n", sqlite3_errmsg(db));
         return;
     }
-    
-    exec_sql(db, "BEGIN TRANSACTION");
-    
+
+    run_stmt(begin_stmt);
+
     start = get_time();
-    
+
     for (i = 0; i < NUM_UPDATES; i++) {
         int idx = rand() % NUM_RECORDS;
         snprintf(key, sizeof(key), "key_%08d", idx);
         snprintf(value, sizeof(value), "updated_value_%08d", idx);
-        
+
         sqlite3_bind_blob(stmt, 1, value, strlen(value), SQLITE_TRANSIENT);
         sqlite3_bind_blob(stmt, 2, key, strlen(key), SQLITE_TRANSIENT);
-        
+
         sqlite3_step(stmt);
         sqlite3_reset(stmt);
     }
-    
-    exec_sql(db, "COMMIT");
-    
+
+    run_stmt(commit_stmt);
+
     end = get_time();
-    
+
     sqlite3_finalize(stmt);
+    sqlite3_finalize(begin_stmt);
+    sqlite3_finalize(commit_stmt);
     
     print_result("Random updates", end - start, NUM_UPDATES);
 }
@@ -278,31 +302,35 @@ static void bench_random_deletes(sqlite3 *db) {
     double start, end;
     sqlite3_stmt *stmt = NULL;
     
+    sqlite3_stmt *begin_stmt = prepare_begin(db);
+    sqlite3_stmt *commit_stmt = prepare_commit(db);
     const char *delete_sql = "DELETE FROM kvpairs WHERE key = ?";
     rc = sqlite3_prepare_v2(db, delete_sql, -1, &stmt, NULL);
     if (rc != SQLITE_OK) {
         fprintf(stderr, "Failed to prepare statement: %s\n", sqlite3_errmsg(db));
         return;
     }
-    
-    exec_sql(db, "BEGIN TRANSACTION");
-    
+
+    run_stmt(begin_stmt);
+
     start = get_time();
-    
+
     for (i = 0; i < NUM_DELETES; i++) {
         int idx = rand() % NUM_RECORDS;
         snprintf(key, sizeof(key), "key_%08d", idx);
-        
+
         sqlite3_bind_blob(stmt, 1, key, strlen(key), SQLITE_TRANSIENT);
         sqlite3_step(stmt);
         sqlite3_reset(stmt);
     }
-    
-    exec_sql(db, "COMMIT");
-    
+
+    run_stmt(commit_stmt);
+
     end = get_time();
-    
+
     sqlite3_finalize(stmt);
+    sqlite3_finalize(begin_stmt);
+    sqlite3_finalize(commit_stmt);
     
     print_result("Random deletes", end - start, NUM_DELETES);
 }
@@ -349,18 +377,21 @@ static void bench_mixed_workload(sqlite3 *db) {
     
     int total_ops = 20000;
     char key[32], value[128];
-    int i, rc;
+    int i;
     double start, end;
     sqlite3_stmt *select_stmt = NULL;
     sqlite3_stmt *update_stmt = NULL;
     sqlite3_stmt *delete_stmt = NULL;
     
+    sqlite3_stmt *begin_stmt = prepare_begin(db);
+    sqlite3_stmt *commit_stmt = prepare_commit(db);
+
     /* Prepare statements */
     sqlite3_prepare_v2(db, "SELECT value FROM kvpairs WHERE key = ?", -1, &select_stmt, NULL);
     sqlite3_prepare_v2(db, "INSERT OR REPLACE INTO kvpairs (key, value) VALUES (?, ?)", -1, &update_stmt, NULL);
     sqlite3_prepare_v2(db, "DELETE FROM kvpairs WHERE key = ?", -1, &delete_stmt, NULL);
-    
-    exec_sql(db, "BEGIN TRANSACTION");
+
+    run_stmt(begin_stmt);
     
     start = get_time();
     
@@ -392,13 +423,15 @@ static void bench_mixed_workload(sqlite3 *db) {
         }
     }
     
-    exec_sql(db, "COMMIT");
-    
+    run_stmt(commit_stmt);
+
     end = get_time();
-    
+
     sqlite3_finalize(select_stmt);
     sqlite3_finalize(update_stmt);
     sqlite3_finalize(delete_stmt);
+    sqlite3_finalize(begin_stmt);
+    sqlite3_finalize(commit_stmt);
     
     print_result("Mixed workload", end - start, total_ops);
 }
@@ -424,10 +457,12 @@ static void bench_bulk_insert(void) {
     
     init_database(db);
     
+    sqlite3_stmt *begin_stmt = prepare_begin(db);
+    sqlite3_stmt *commit_stmt = prepare_commit(db);
     const char *insert_sql = "INSERT INTO kvpairs (key, value) VALUES (?, ?)";
     sqlite3_prepare_v2(db, insert_sql, -1, &stmt, NULL);
-    
-    exec_sql(db, "BEGIN TRANSACTION");
+
+    run_stmt(begin_stmt);
     
     start = get_time();
     
@@ -442,11 +477,13 @@ static void bench_bulk_insert(void) {
         sqlite3_reset(stmt);
     }
     
-    exec_sql(db, "COMMIT");
-    
+    run_stmt(commit_stmt);
+
     end = get_time();
-    
+
     sqlite3_finalize(stmt);
+    sqlite3_finalize(begin_stmt);
+    sqlite3_finalize(commit_stmt);
     sqlite3_close(db);
     remove("benchmark_bulk.db");
     
