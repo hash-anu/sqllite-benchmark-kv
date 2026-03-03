@@ -103,22 +103,18 @@ static void run_stmt(sqlite3_stmt *s) {
 
 /* Initialize database with table */
 static int init_database(sqlite3 *db) {
-    const char *create_table = 
+    /* PRAGMAs before any write so page_size and journal_mode take effect */
+    exec_sql(db, "PRAGMA page_size = 4096");
+    exec_sql(db, "PRAGMA journal_mode = WAL");
+    exec_sql(db, "PRAGMA synchronous = NORMAL");
+    exec_sql(db, "PRAGMA cache_size = 2000");
+
+    const char *create_table =
     "CREATE TABLE IF NOT EXISTS kvpairs ("
     "  key BLOB PRIMARY KEY,"
     "  value BLOB NOT NULL"
     ") WITHOUT ROWID";
     if (exec_sql(db, create_table) != 0) return -1;
-    
-    /* Enable optimizations */
-  //  exec_sql(db, "PRAGMA synchronous = NORMAL");
-  //  exec_sql(db, "PRAGMA journal_mode = WAL");
-  //  exec_sql(db, "PRAGMA cache_size = -64000");
-  //  exec_sql(db, "PRAGMA temp_store = MEMORY");
-    exec_sql(db, "PRAGMA page_size = 4096");
-    exec_sql(db, "PRAGMA cache_size = 2000");
-exec_sql(db, "PRAGMA journal_mode = WAL"); /* match rollback journal */
-exec_sql(db, "PRAGMA synchronous = NORMAL");    /* fair durability */
 
     return 0;
 }
@@ -178,39 +174,39 @@ static void bench_sequential_writes(sqlite3 *db) {
 static void bench_random_reads(sqlite3 *db) {
     print_header("BENCHMARK 2: Random Reads");
     printf("  Reading %d random records...\n\n", NUM_READS);
-    
+
     char key[32];
     int i, rc;
     double start, end;
     sqlite3_stmt *stmt = NULL;
-    
+
     const char *select_sql = "SELECT value FROM kvpairs WHERE key = ?";
     rc = sqlite3_prepare_v2(db, select_sql, -1, &stmt, NULL);
     if (rc != SQLITE_OK) {
         fprintf(stderr, "Failed to prepare statement: %s\n", sqlite3_errmsg(db));
         return;
     }
-    
+
     start = get_time();
-    
+
     for (i = 0; i < NUM_READS; i++) {
         int idx = rand() % NUM_RECORDS;
         snprintf(key, sizeof(key), "key_%08d", idx);
-        
+
         sqlite3_bind_blob(stmt, 1, key, strlen(key), SQLITE_TRANSIENT);
-        
+
         if (sqlite3_step(stmt) == SQLITE_ROW) {
             /* Got the value - just consume it */
             sqlite3_column_blob(stmt, 0);
         }
-        
+
         sqlite3_reset(stmt);
     }
-    
+
     end = get_time();
-    
+
     sqlite3_finalize(stmt);
-    
+
     print_result("Random reads", end - start, NUM_READS);
 }
 
@@ -339,34 +335,34 @@ static void bench_random_deletes(sqlite3 *db) {
 static void bench_exists_checks(sqlite3 *db) {
     print_header("BENCHMARK 6: Exists Checks");
     printf("  Checking existence of %d keys...\n\n", NUM_READS);
-    
+
     char key[32];
     int i, rc;
     double start, end;
     sqlite3_stmt *stmt = NULL;
-    
+
     const char *exists_sql = "SELECT 1 FROM kvpairs WHERE key = ? LIMIT 1";
     rc = sqlite3_prepare_v2(db, exists_sql, -1, &stmt, NULL);
     if (rc != SQLITE_OK) {
         fprintf(stderr, "Failed to prepare statement: %s\n", sqlite3_errmsg(db));
         return;
     }
-    
+
     start = get_time();
-    
+
     for (i = 0; i < NUM_READS; i++) {
         int idx = rand() % NUM_RECORDS;
         snprintf(key, sizeof(key), "key_%08d", idx);
-        
+
         sqlite3_bind_blob(stmt, 1, key, strlen(key), SQLITE_TRANSIENT);
         sqlite3_step(stmt);
         sqlite3_reset(stmt);
     }
-    
+
     end = get_time();
-    
+
     sqlite3_finalize(stmt);
-    
+
     print_result("Exists checks", end - start, NUM_READS);
 }
 
